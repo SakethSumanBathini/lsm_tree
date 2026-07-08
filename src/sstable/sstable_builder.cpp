@@ -1,0 +1,71 @@
+#include "sstable.h"
+#include <fstream>
+#include <stdexcept>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
+
+void SSTable::write(const std::string& path, const std::vector<Entry>& entries) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open())
+        throw std::runtime_error("SSTable: cannot create file: " + path);
+
+    BloomFilter bloom(std::max(entries.size(), size_t(1)));
+    std::vector<std::pair<std::string, uint64_t>> index;
+
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (i % ENTRIES_PER_BLOCK == 0)
+            index.push_back({entries[i].key, static_cast<uint64_t>(out.tellp())});
+
+        bloom.insert(entries[i].key);
+        writeEntry(out, entries[i]);
+    }
+
+    uint64_t index_offset = static_cast<uint64_t>(out.tellp());
+    uint32_t index_count  = static_cast<uint32_t>(index.size());
+    writeUint32(out, index_count);
+    for (auto& [key, offset] : index) {
+        writeString(out, key);
+        writeUint64(out, offset);
+    }
+
+    uint64_t bloom_offset = static_cast<uint64_t>(out.tellp());
+    serializeBloom(out, bloom);
+
+    writeUint64(out, index_offset);
+    writeUint64(out, bloom_offset);
+    out.flush();
+    out.close();
+
+    // fsync the file to ensure durability before the WAL is cleared.
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        fsync(fd);
+        close(fd);
+    }
+}
+
+void SSTable::writeEntry(std::ofstream& out, const Entry& e) {
+    uint8_t is_tombstone = e.value.has_value() ? 0 : 1;
+    out.write(reinterpret_cast<const char*>(&is_tombstone), 1);
+    writeString(out, e.key);
+    writeString(out, e.value.value_or(""));
+}
+
+void SSTable::writeString(std::ofstream& out, const std::string& s) {
+    uint32_t len = static_cast<uint32_t>(s.size());
+    out.write(reinterpret_cast<const char*>(&len), 4);
+    out.write(s.data(), len);
+}
+
+void SSTable::writeUint32(std::ofstream& out, uint32_t v) { out.write(reinterpret_cast<const char*>(&v), 4); }
+void SSTable::writeUint64(std::ofstream& out, uint64_t v) { out.write(reinterpret_cast<const char*>(&v), 8); }
+
+void SSTable::serializeBloom(std::ofstream& out, const BloomFilter& bf) {
+    uint64_t num_hashes = static_cast<uint64_t>(bf.hashCount());
+    uint64_t num_blocks = static_cast<uint64_t>(bf.blockCount());
+    out.write(reinterpret_cast<const char*>(&num_hashes), 8);
+    out.write(reinterpret_cast<const char*>(&num_blocks), 8);
+    auto data = bf.serialize();
+    out.write(reinterpret_cast<const char*>(data.data()), data.size());
+}

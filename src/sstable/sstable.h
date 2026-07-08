@@ -1,0 +1,49 @@
+#pragma once
+#include "block_bloom_filter.h"
+#include <string>
+#include <vector>
+#include <optional>
+#include <memory>
+#include <cstdint>
+
+class SSTable {
+public:
+    static constexpr size_t ENTRIES_PER_BLOCK = 64;
+
+    struct Entry {
+        std::string key;
+        std::optional<std::string> value;
+    };
+
+    static void write(const std::string& path, const std::vector<Entry>& entries);
+
+    explicit SSTable(const std::string& path);
+
+    std::optional<std::optional<std::string>> get(const std::string& key) const;
+    std::vector<Entry> readAll() const;
+
+    const std::string& smallestKey() const { return smallest_key_; }
+    const std::string& largestKey()  const { return largest_key_; }
+    const std::string& path()        const { return path_; }
+
+private:
+    std::string path_;
+    std::vector<std::pair<std::string, uint64_t>> index_;
+    std::unique_ptr<BloomFilter> bloom_;
+    std::string smallest_key_;
+    std::string largest_key_;
+
+    uint64_t findBlock(const std::string& key) const;
+
+    static void writeEntry(std::ofstream& out, const Entry& e);
+    static Entry readEntry(std::ifstream& in);
+    static void writeString(std::ofstream& out, const std::string& s);
+    static std::string readString(std::ifstream& in);
+    static void writeUint32(std::ofstream& out, uint32_t v);
+    static uint32_t readUint32(std::ifstream& in);
+    static void writeUint64(std::ofstream& out, uint64_t v);
+    static uint64_t readUint64(std::ifstream& in);
+
+    static void serializeBloom(std::ofstream& out, const BloomFilter& bf);
+    static std::unique_ptr<BloomFilter> deserializeBloom(std::ifstream& in);
+};

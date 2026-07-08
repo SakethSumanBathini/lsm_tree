@@ -24,5 +24,5 @@ RUN mkdir -p build && \
     cmake .. && \
     make
 
-# Set the entry point to run the tests
-CMD ["./build/lsm_tests"]
+# Set the entry point to run the tests and benchmarks
+CMD ["./run_all.sh"]

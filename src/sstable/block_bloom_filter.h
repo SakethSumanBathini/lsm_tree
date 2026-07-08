@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 
 // Vectorized Block Bloom Filter: Aligned to 64-byte CPU cache lines.
 // This ensures that checking for a key takes exactly one cache-miss penalty.
