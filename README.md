@@ -26,9 +26,41 @@
 ## 💡 The "Why" vs. "How" (Systems Rationale)
 
 * **The Bottleneck (Why standard databases stall)**:  
-  Traditional database write paths use synchronous system calls (`write`, `fdatasync`) to write-ahead logs (WAL). Under heavy write traffic, this causes kernel page-cache lock contention, thread context-switching overhead, and un-predictable I/O flush stalls.
+  Traditional database write paths use synchronous system calls (`write`, `fdatasync`) to write-ahead logs (WAL). Under heavy write traffic, this causes kernel page-cache lock contention, thread context-switching overhead, and unpredictable I/O flush stalls.
 * **The Low-Level Fix (How we solved it)**:  
   This engine uses Linux **`io_uring`** combined with **`O_DIRECT`**. Requests submit directly to the kernel submission ring queue (SQ), executing non-blocking hardware-level **Direct Memory Access (DMA)** straight to physical disk blocks. On the read path, negative queries fail fast in **0.06 μs** by using **64-byte CPU cache-aligned Block Bloom Filters** that restrict filter bit probes to at most **one CPU cache line miss**.
+
+---
+
+## 🛠️ How It Was Achieved (Engineering Deep-Dive)
+
+To achieve **254k ops/sec** write throughput and **0.76μs** point lookups, four core low-level systems optimizations were engineered:
+
+### 1. `io_uring` Ring Queues + `O_DIRECT` Zero-Copy Logging
+- **Direct Memory Access (DMA)**: File descriptors open with `O_DIRECT`, bypassing the kernel page cache entirely.
+- **Page-Aligned Memory Allocation**: Memory buffers are allocated using `posix_memalign(&buf, 512, size)` to satisfy hardware 512-byte block alignment requirements.
+- **Submission & Completion Ring Queues**: Log writes prepare using `io_uring_prep_write` and submit directly to the kernel Submission Queue (SQ). Completions are reaped asynchronously from the Completion Queue (CQ) without blocking calling threads.
+
+```cpp
+// Direct I/O submission to io_uring ring
+struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+io_uring_prep_write(sqe, wal_fd_, aligned_buf, aligned_size, offset_);
+io_uring_sqe_set_data(sqe, req_metadata);
+io_uring_submit(&ring_); // Non-blocking kernel submission
+```
+
+### 2. Lock-Free SkipList MemTable with Atomic CAS
+- **Atomic Pointer Arrays**: SkipList nodes store atomic forward pointers (`std::atomic<Node*>`).
+- **Lock-Free CAS Insertions**: Insertions update pointers dynamically using atomic Compare-And-Swap (`compare_exchange_weak`), allowing multiple worker threads to insert entries concurrently without mutex locks.
+- **Thread-Safe Arena Bump-Allocator**: Memory for new nodes is allocated from pre-reserved 1MB memory blocks (`Arena`), eliminating dynamic `malloc` overhead and heap fragmentation.
+
+### 3. 64-Byte CPU Cache-Aligned Block Bloom Filters
+- **Cache Line Partitioning**: Standard Bloom filters scatter bit lookups across random memory addresses, causing up to 8 cache misses per query. Our filter partitions bits into 64-byte blocks matching exact CPU L1 cache line sizes.
+- **Single-Pass Double Hashing**: Computes FNV-1a and Murmur mix hashes in a single pass to map keys to a single 64-byte block, guaranteeing **at most 1 cache miss penalty**.
+
+### 4. Single-Pass Leveled Compaction (L0 → L1)
+- **Multiway Merge Sort**: Merges overlapping Level 0 SSTables into non-overlapping Level 1 SSTables using a min-heap priority queue across sorted iterators.
+- **Tombstone Purging**: Single-pass deduplication discards stale overwrite keys and purges deleted records (`DELETE` tombstones), keeping storage growth strictly bounded.
 
 ---
 
