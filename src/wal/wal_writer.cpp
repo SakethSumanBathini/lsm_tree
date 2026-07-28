@@ -12,8 +12,10 @@ WAL::WAL(const std::string& path) : path_(path) {
 
     if (io_uring_queue_init(8, &ring_, 0) < 0) {
         close(fd_);
+        fd_ = -1;
         throw std::runtime_error("WAL: failed to init io_uring");
     }
+    ring_ready_ = true;
 }
 
 WAL::~WAL() {
@@ -23,7 +25,10 @@ WAL::~WAL() {
     }
     // Ensure all writes are durable on disk before closing.
     if (fd_ >= 0) fdatasync(fd_);
-    io_uring_queue_exit(&ring_);
+    if (ring_ready_) {
+        io_uring_queue_exit(&ring_);
+        ring_ready_ = false;
+    }
     if (fd_ >= 0) close(fd_);
 }
 
@@ -38,11 +43,39 @@ void WAL::logDel(const std::string& key) {
 void WAL::clear() {
     std::lock_guard<std::mutex> lock(mu_);
     reap();                     // drain any pending CQEs
-    io_uring_queue_exit(&ring_);
-    close(fd_);
-    std::filesystem::remove(path_);
+
+    // Every handle is marked released as it is released, and the removal uses
+    // the non-throwing overload. The previous ordering exited the ring and
+    // closed the descriptor and *then* called the throwing form of remove(),
+    // so a failed removal escaped with the ring already exited and fd_ still
+    // holding a closed descriptor — after which the destructor exited the ring
+    // a second time and closed the descriptor again.
+    if (ring_ready_) {
+        io_uring_queue_exit(&ring_);
+        ring_ready_ = false;
+    }
+    if (fd_ >= 0) {
+        close(fd_);
+        fd_ = -1;
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(path_, ec);
+    if (ec) {
+        throw std::runtime_error("WAL: failed to remove log during clear: " + ec.message());
+    }
+
     fd_ = open(path_.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_DIRECT, 0644);
-    io_uring_queue_init(8, &ring_, 0);
+    if (fd_ < 0) {
+        throw std::runtime_error("WAL: cannot reopen log after clear: " + path_);
+    }
+
+    if (io_uring_queue_init(8, &ring_, 0) < 0) {
+        close(fd_);
+        fd_ = -1;
+        throw std::runtime_error("WAL: failed to re-init io_uring after clear");
+    }
+    ring_ready_ = true;
 }
 
 void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string& value) {
