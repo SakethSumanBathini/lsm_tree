@@ -66,8 +66,30 @@ void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string
     uint32_t crc = crc32(static_cast<uint8_t>(type), key, value);
     std::memcpy(p, &crc, 4);
 
-    // Prepare io_uring SQE
+    // Prepare io_uring SQE.
+    //
+    // io_uring_get_sqe() yields nullptr when the submission ring has no free
+    // slot. The result was previously passed straight to io_uring_prep_write(),
+    // which dereferences it. Reaching that state needs submissions to stop
+    // draining the ring — see the unchecked io_uring_submit() below, whose
+    // failures leave SQEs queued — but the pointer has to be checked either way.
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+    if (!sqe) {
+        // Flush what is queued to release slots, harvest completions, retry once.
+        int flushed = io_uring_submit(&ring_);
+        if (flushed < 0) {
+            free(buf);
+            throw std::runtime_error(std::string("WAL: io_uring_submit failed while draining: ")
+                                     + std::strerror(-flushed));
+        }
+        reap();
+        sqe = io_uring_get_sqe(&ring_);
+        if (!sqe) {
+            free(buf);
+            throw std::runtime_error("WAL: io_uring submission queue full");
+        }
+    }
+
     io_uring_prep_write(sqe, fd_, buf, aligned_size, -1); // -1 = current offset (append)
     io_uring_sqe_set_data(sqe, buf); // Tag with buffer pointer for freeing later
     
