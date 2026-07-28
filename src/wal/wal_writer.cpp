@@ -126,8 +126,34 @@ void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string
     io_uring_prep_write(sqe, fd_, buf, aligned_size, -1); // -1 = current offset (append)
     io_uring_sqe_set_data(sqe, buf); // Tag with buffer pointer for freeing later
     
-    io_uring_submit(&ring_);
-    
+    // io_uring_submit() returns a negative errno on failure. The result was
+    // discarded, so a failed submission was indistinguishable from a successful
+    // one. Two things follow from that: no completion is ever produced for the
+    // write, so the buffer tagged on the SQE is never freed by reap(); and the
+    // SQE stays queued, consuming one of the ring's eight slots. Repeated
+    // failures therefore leak a buffer each time and eventually exhaust the
+    // ring, which is what makes io_uring_get_sqe() start returning nullptr.
+    int submitted = io_uring_submit(&ring_);
+    if (submitted < 0) {
+        // Detach the buffer from the completion tag, but deliberately do not
+        // free it.
+        //
+        // A failed submit does not necessarily consume the SQE. It stays in the
+        // ring with sqe->addr still pointing at this buffer, and a later
+        // io_uring_submit() may carry it to the kernel — which would then DMA
+        // out of freed memory and write whatever now occupies it into the log.
+        // Clearing user_data only stops reap() from freeing the pointer twice;
+        // it does nothing about the address the kernel would read from.
+        //
+        // The buffer is therefore retained for the lifetime of the ring. That
+        // is a leak, and an intentional one: reclaiming it safely requires
+        // tearing the ring down so the entry can never be submitted, which is
+        // beyond what this change should do to the write path.
+        io_uring_sqe_set_data(sqe, nullptr);
+        throw std::runtime_error(std::string("WAL: io_uring_submit failed: ")
+                                 + std::strerror(-submitted));
+    }
+
     // Reap any completed CQEs (non-blocking) to free buffers promptly
     reap();
 }
