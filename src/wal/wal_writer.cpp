@@ -71,8 +71,24 @@ void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string
     io_uring_prep_write(sqe, fd_, buf, aligned_size, -1); // -1 = current offset (append)
     io_uring_sqe_set_data(sqe, buf); // Tag with buffer pointer for freeing later
     
-    io_uring_submit(&ring_);
-    
+    // io_uring_submit() returns a negative errno on failure. The result was
+    // discarded, so a failed submission was indistinguishable from a successful
+    // one. Two things follow from that: no completion is ever produced for the
+    // write, so the buffer tagged on the SQE is never freed by reap(); and the
+    // SQE stays queued, consuming one of the ring's eight slots. Repeated
+    // failures therefore leak a buffer each time and eventually exhaust the
+    // ring, which is what makes io_uring_get_sqe() start returning nullptr.
+    int submitted = io_uring_submit(&ring_);
+    if (submitted < 0) {
+        // Detach the buffer from the SQE before releasing it. The entry remains
+        // queued and a later submit may still carry it to completion; leaving
+        // the pointer attached would hand reap() a dangling buffer to free.
+        io_uring_sqe_set_data(sqe, nullptr);
+        free(buf);
+        throw std::runtime_error(std::string("WAL: io_uring_submit failed: ")
+                                 + std::strerror(-submitted));
+    }
+
     // Reap any completed CQEs (non-blocking) to free buffers promptly
     reap();
 }
