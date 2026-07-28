@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <optional>
+#include <shared_mutex>
 
 class LSMEngine {
 public:
@@ -20,10 +21,30 @@ public:
     std::optional<std::string> get(const std::string& key) const;
     void flush();
 
-    size_t memtableSize()  const { return memtable_->size(); }
-    size_t sstableCount()  const { return sstables_.size(); }
+    size_t memtableSize()  const {
+        std::shared_lock<std::shared_mutex> lock(mu_);
+        return memtable_->size();
+    }
+    size_t sstableCount()  const {
+        std::shared_lock<std::shared_mutex> lock(mu_);
+        return sstables_.size();
+    }
 
 private:
+    // Guards every member below it.
+    //
+    // put(), del() and flush() replace `memtable_`, push onto `sstables_` and
+    // hand that vector to the compactor, which clears and refills it. get()
+    // walks the same vector and dereferences the memtable. None of that was
+    // synchronised, so a reader indexing `sstables_` while a writer reallocated
+    // it read through a dangling pointer, and two writers flushing together
+    // corrupted the vector outright.
+    //
+    // Shared rather than exclusive because reads are the common case and are
+    // genuinely parallel-safe: Memtable::get() is const, and SSTable::get()
+    // opens its own ifstream per call rather than sharing one.
+    mutable std::shared_mutex mu_;
+
     std::string data_dir_;
     size_t memtable_max_bytes_;
     WAL         wal_;
@@ -33,6 +54,9 @@ private:
     int lock_fd_ = -1;
     LeveledCompactor compactor_;
 
+    // Requires the caller to already hold mu_ exclusively. Called from put(),
+    // del() and flush(), all of which take that lock — taking it again here
+    // would deadlock, since std::shared_mutex is not recursive.
     void flushMemtable();
     void recoverFromWAL();
     void loadSSTables();

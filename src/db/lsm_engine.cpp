@@ -46,6 +46,7 @@ const std::string& LSMEngine::ensureDir(const std::string& dir) {
 }
 
 void LSMEngine::put(const std::string& key, const std::string& value) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
     wal_.logPut(key, value);
     memtable_->put(key, value);
     if (memtable_->isFull()) {
@@ -54,6 +55,7 @@ void LSMEngine::put(const std::string& key, const std::string& value) {
 }
 
 void LSMEngine::del(const std::string& key) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
     wal_.logDel(key);
     memtable_->del(key);
     if (memtable_->isFull()) {
@@ -62,6 +64,8 @@ void LSMEngine::del(const std::string& key) {
 }
 
 std::optional<std::string> LSMEngine::get(const std::string& key) const {
+    std::shared_lock<std::shared_mutex> lock(mu_);
+
     // 1. Search in MemTable
     auto mem_result = memtable_->get(key);
     if (mem_result.has_value()) {
@@ -79,6 +83,7 @@ std::optional<std::string> LSMEngine::get(const std::string& key) const {
 }
 
 void LSMEngine::flush() {
+    std::unique_lock<std::shared_mutex> lock(mu_);
     if (!memtable_->empty()) {
         flushMemtable();
     }
