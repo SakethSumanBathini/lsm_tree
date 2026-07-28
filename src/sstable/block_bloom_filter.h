@@ -79,6 +79,16 @@ public:
 
     static BloomFilter deserialize(size_t num_blocks, size_t num_hashes, const std::vector<uint8_t>& data) {
         BloomFilter bf(1); // dummy
+
+        // num_blocks and num_hashes arrive from the SSTable footer, i.e. from
+        // disk, so they are untrusted. The constructor clamps num_blocks_ to at
+        // least 1 precisely because insert() and mayContain() reduce modulo it;
+        // assigning the members directly here bypasses that clamp, and a
+        // truncated or corrupted file carrying num_blocks == 0 turns the next
+        // `h1 % num_blocks_` into a division by zero (SIGFPE).
+        if (num_blocks == 0) num_blocks = 1;
+        if (num_hashes == 0) num_hashes = 1;
+
         bf.num_blocks_ = num_blocks;
         bf.num_hashes_ = num_hashes;
         bf.blocks_.resize(num_blocks);
