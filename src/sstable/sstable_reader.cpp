@@ -104,7 +104,30 @@ std::unique_ptr<BloomFilter> SSTable::deserializeBloom(std::ifstream& in) {
     uint64_t num_hashes, num_blocks;
     in.read(reinterpret_cast<char*>(&num_hashes), 8);
     in.read(reinterpret_cast<char*>(&num_blocks), 8);
-    std::vector<uint8_t> data(num_blocks * 64);
+
+    // num_blocks comes from the file, and `num_blocks * 64` sized an allocation
+    // directly from it. A corrupted or truncated footer could therefore ask for
+    // an arbitrary amount of memory before a single byte was validated, and the
+    // multiplication itself overflows once num_blocks exceeds 2^58.
+    //
+    // Bound it by what the file can actually contain: the bloom section runs
+    // from here to the start of the 16-byte footer. The comparison is done by
+    // division so no product is formed before the check.
+    const std::streampos here = in.tellg();
+    in.seekg(0, std::ios::end);
+    const uint64_t file_size = static_cast<uint64_t>(in.tellg());
+    in.seekg(here);
+
+    constexpr uint64_t kFooterBytes = 16;
+    constexpr uint64_t kBlockBytes = 64;
+    const uint64_t pos = static_cast<uint64_t>(here);
+    const uint64_t available = (file_size >= pos + kFooterBytes) ? (file_size - pos - kFooterBytes) : 0;
+
+    if (num_blocks > available / kBlockBytes) {
+        throw std::runtime_error("SSTable: bloom filter block count exceeds file contents");
+    }
+
+    std::vector<uint8_t> data(num_blocks * kBlockBytes);
     in.read(reinterpret_cast<char*>(data.data()), data.size());
     return std::make_unique<BloomFilter>(BloomFilter::deserialize(num_blocks, num_hashes, data));
 }
