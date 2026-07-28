@@ -27,6 +27,10 @@ private:
     int fd_;
     std::string path_;
     struct io_uring ring_;
+    // Tracks whether ring_ currently holds an initialised io_uring. Without it,
+    // a clear() that fails partway leaves the destructor exiting a ring that
+    // has already been exited.
+    bool ring_ready_ = false;
     mutable std::mutex mu_;
 
     void writeEntry(Entry::Type type, const std::string& key, const std::string& value);
