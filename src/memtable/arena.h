@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <new>
+#include <stdexcept>
 
 // Arena: simple thread-safe bump-pointer allocator for Lock-Free SkipList nodes.
 // Memory is reclaimed entirely when the Arena (and Memtable) is destroyed.
@@ -27,11 +30,27 @@ public:
     // requirement — Node holds std::atomic<Node*> — depended on every prior
     // allocation happening to be a multiple of that alignment.
     void* allocate(size_t bytes, size_t alignment = alignof(std::max_align_t)) {
+        // padFor reduces modulo `alignment`, so zero would be a division by
+        // zero, and a non-power-of-two would not describe a valid alignment.
+        if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
+            throw std::invalid_argument("Arena::allocate: alignment must be a non-zero power of two");
+        }
+        // Sizing a fresh block computes `bytes + alignment`; refuse anything
+        // that would wrap rather than allocating a block smaller than asked for.
+        if (bytes > std::numeric_limits<size_t>::max() - alignment) {
+            throw std::bad_alloc();
+        }
+
         std::lock_guard<std::mutex> lock(mu_);
 
         size_t pad = padFor(current_block_ + offset_, alignment);
 
-        if (offset_ + pad + bytes > current_block_size_) {
+        // Written as subtractions because `offset_ + pad + bytes` can wrap, and
+        // a wrapped sum compares as small enough to fit — which would advance
+        // the bump pointer past the end of the block. offset_ never exceeds
+        // current_block_size_, so neither subtraction underflows.
+        const size_t remaining = current_block_size_ - offset_;
+        if (pad > remaining || bytes > remaining - pad) {
             // A fresh block: size it for the payload plus worst-case padding.
             size_t next_size = std::max(block_size_, bytes + alignment);
             current_block_ = new char[next_size];
