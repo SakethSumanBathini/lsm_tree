@@ -15,6 +15,7 @@ SSTable::SSTable(const std::string& path) : path_(path) {
     in.seekg(-16, std::ios::end);
     uint64_t index_offset = readUint64(in);
     uint64_t bloom_offset = readUint64(in);
+    index_offset_ = index_offset;
 
     in.seekg(index_offset);
     uint32_t index_count = readUint32(in);
@@ -45,8 +46,17 @@ std::optional<std::optional<std::string>> SSTable::get(const std::string& key) c
     std::ifstream in(path_, std::ios::binary);
     if (!in.is_open()) return std::nullopt;
 
+    // The loop must stop at the end of the data region, not at end of file.
+    // Past the last data entry the file still holds the index, the bloom filter
+    // and the footer, so `peek() != EOF` stays true and readEntry() goes on to
+    // interpret those bytes as entries — decoding arbitrary values as string
+    // lengths. Bounding on index_offset_ is what readAll() already does.
     in.seekg(block_offset);
-    for (size_t i = 0; i < ENTRIES_PER_BLOCK && in.peek() != EOF; ++i) {
+    for (size_t i = 0;
+         i < ENTRIES_PER_BLOCK
+           && static_cast<uint64_t>(in.tellg()) < index_offset_
+           && in.peek() != EOF;
+         ++i) {
         Entry e = readEntry(in);
         if (e.key == key) return e.value;
         if (e.key > key)  return std::nullopt;

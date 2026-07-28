@@ -32,6 +32,9 @@ private:
     std::unique_ptr<BloomFilter> bloom_;
     std::string smallest_key_;
     std::string largest_key_;
+    // Offset at which the data region ends and the index begins. get() needs
+    // it to know where to stop; readAll() already reads it back off the footer.
+    uint64_t index_offset_ = 0;
 
     uint64_t findBlock(const std::string& key) const;
 
