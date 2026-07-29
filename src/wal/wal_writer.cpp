@@ -80,6 +80,14 @@ void WAL::clear() {
 
 void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lock(mu_);
+
+    // A completion has already reported a failed or short write, so the log on
+    // disk no longer describes what the caller was told was committed. Refuse
+    // further entries rather than appending to a record stream with a hole in
+    // it.
+    if (!failure_.empty()) {
+        throw std::runtime_error("WAL: refusing to write, " + failure_);
+    }
     // Allocate 4096-aligned buffer for O_DIRECT
     size_t size = 1 + 4 + 4 + key.size() + value.size() + 4;
     size_t aligned_size = (size + 511) & ~511; // Align to 512 for O_DIRECT
@@ -123,8 +131,12 @@ void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string
         }
     }
 
+    // Carry the requested length alongside the buffer so the completion can be
+    // compared against it.
+    auto* pending = new PendingWrite{ buf, aligned_size };
+
     io_uring_prep_write(sqe, fd_, buf, aligned_size, -1); // -1 = current offset (append)
-    io_uring_sqe_set_data(sqe, buf); // Tag with buffer pointer for freeing later
+    io_uring_sqe_set_data(sqe, pending);
     
     // io_uring_submit() returns a negative errno on failure. The result was
     // discarded, so a failed submission was indistinguishable from a successful
@@ -150,6 +162,7 @@ void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string
         // tearing the ring down so the entry can never be submitted, which is
         // beyond what this change should do to the write path.
         io_uring_sqe_set_data(sqe, nullptr);
+        // `pending` is retained for the same reason as the buffer it describes.
         throw std::runtime_error(std::string("WAL: io_uring_submit failed: ")
                                  + std::strerror(-submitted));
     }
@@ -158,11 +171,37 @@ void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string
     reap();
 }
 
+void WAL::recordFailure(const std::string& detail) {
+    // Keep the first failure: it is the one that explains where the log stopped
+    // being trustworthy. Later ones are usually consequences of it.
+    if (failure_.empty()) {
+        failure_ = detail;
+    }
+    std::cerr << "[WAL] " << detail << std::endl;
+}
+
 void WAL::reap() {
     struct io_uring_cqe* cqe;
     while (io_uring_peek_cqe(&ring_, &cqe) == 0) {
-        void* buf = io_uring_cqe_get_data(cqe);
-        free(buf);
+        auto* pending = static_cast<PendingWrite*>(io_uring_cqe_get_data(cqe));
+
+        // cqe->res carries the write's outcome and was previously discarded, so
+        // -ENOSPC, -EIO and partial writes all looked identical to success. A
+        // negative value means nothing reached the log; a value below the
+        // requested length means the record on disk is truncated. Either way the
+        // caller has been told the entry is recoverable when it is not.
+        if (pending) {
+            if (cqe->res < 0) {
+                recordFailure(std::string("write failed: ") + std::strerror(-cqe->res));
+            } else if (static_cast<size_t>(cqe->res) < pending->bytes) {
+                recordFailure("short write: " + std::to_string(cqe->res) + " of "
+                              + std::to_string(pending->bytes) + " bytes reached the log");
+            }
+
+            free(pending->buf);
+            delete pending;
+        }
+
         io_uring_cqe_seen(&ring_, cqe);
     }
 }

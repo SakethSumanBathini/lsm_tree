@@ -33,6 +33,21 @@ private:
     bool ring_ready_ = false;
     mutable std::mutex mu_;
 
+    // Tagged on each SQE so the completion can be checked against what was
+    // asked for. The buffer pointer alone was not enough to recognise a short
+    // write, since the expected length was not recorded anywhere.
+    struct PendingWrite {
+        void*  buf;
+        size_t bytes;
+    };
+
+    // First completion failure seen, retained rather than thrown. reap() runs
+    // from the destructor, where throwing would terminate the process, so it
+    // records and the next writeEntry() reports.
+    std::string failure_;
+
+    void recordFailure(const std::string& detail);
+
     void writeEntry(Entry::Type type, const std::string& key, const std::string& value);
     void reap();
     static uint32_t crc32(uint8_t type, const std::string& key, const std::string& value);
