@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <new>
+#include <utility>
 #include <stdexcept>
 
 // Arena: simple thread-safe bump-pointer allocator for Lock-Free SkipList nodes.
@@ -19,7 +20,32 @@ public:
     }
 
     ~Arena() {
+        // Run registered destructors before releasing the storage they live in.
+        //
+        // The arena hands out raw bytes that callers placement-new into, and it
+        // used to free the blocks without destroying anything in them. For
+        // trivially destructible types that is fine; for anything owning heap
+        // memory it is not, and SkipList::Node holds a std::string key and a
+        // std::optional<std::string> value. Every node therefore leaked its
+        // string allocations, whether or not the node was ever linked in.
+        //
+        // Reverse order mirrors ordinary destruction order.
+        for (auto it = destructors_.rbegin(); it != destructors_.rend(); ++it) {
+            it->second(it->first);
+        }
+        destructors_.clear();
+
         for (char* b : blocks_) delete[] b;
+    }
+
+    // Records an object to destroy when the arena is released.
+    //
+    // Deliberately takes a plain function pointer rather than std::function:
+    // one is registered per object, and a captureless lambda converts to it
+    // with no allocation of its own.
+    void registerDestructor(void* object, void (*destroy)(void*)) {
+        std::lock_guard<std::mutex> lock(mu_);
+        destructors_.emplace_back(object, destroy);
     }
 
     // Returns `bytes` of storage aligned to `alignment`.
@@ -73,6 +99,9 @@ private:
         size_t rem = reinterpret_cast<uintptr_t>(p) % alignment;
         return rem ? alignment - rem : 0;
     }
+
+    // Objects placement-new'd into this arena, in construction order.
+    std::vector<std::pair<void*, void (*)(void*)>> destructors_;
 
     size_t block_size_;
     size_t offset_;
