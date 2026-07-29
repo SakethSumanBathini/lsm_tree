@@ -13,16 +13,50 @@ struct Node {
     std::string key;
     std::optional<std::string> value;
     int height;
-    std::atomic<Node*> next[1]; // Flexible array member (at least 1)
+
+    // Points at `height` link slots carved from the same arena allocation that
+    // holds the Node.
+    //
+    // This was declared `std::atomic<Node*> next[1]` and over-allocated. Two
+    // things were wrong with that. Indexing next[i] for i >= 1 runs off the end
+    // of a one-element array, and — the part that bites in practice — placement
+    // new of a Node only ever constructs next[0]; the slots beyond it stayed
+    // raw arena bytes, so every .store() and .load() above level 0 ran against
+    // an object that was never constructed. Holding a pointer to an array whose
+    // elements are each explicitly constructed removes both problems, and every
+    // `next[i]` use site reads exactly as before.
+    std::atomic<Node*>* next;
 
     static Node* create(Arena& arena, const std::string& k, const std::optional<std::string>& v, int h) {
-        size_t size = sizeof(Node) + (h - 1) * sizeof(std::atomic<Node*>);
-        void* mem = arena.allocate(size);
+        static_assert(alignof(Node) >= alignof(std::atomic<Node*>),
+                      "link slots trail the Node and inherit its alignment");
+
+        constexpr size_t kLinkAlign = alignof(std::atomic<Node*>);
+        const size_t node_bytes = sizeof(Node);
+        const size_t pad = (node_bytes % kLinkAlign) ? kLinkAlign - (node_bytes % kLinkAlign) : 0;
+        const size_t total = node_bytes + pad + sizeof(std::atomic<Node*>) * static_cast<size_t>(h);
+
+        char* mem = static_cast<char*>(arena.allocate(total, alignof(Node)));
         Node* n = new (mem) Node();
-        n->key = k;
-        n->value = v;
+
+        auto* links = reinterpret_cast<std::atomic<Node*>*>(mem + node_bytes + pad);
+        for (int i = 0; i < h; ++i) {
+            ::new (static_cast<void*>(links + i)) std::atomic<Node*>(nullptr);
+        }
+
+        n->next   = links;
+        n->key    = k;
+        n->value  = v;
         n->height = h;
-        for (int i = 0; i < h; ++i) n->next[i].store(nullptr, std::memory_order_relaxed);
+
+        // Registered once the node is fully constructed, and registered for
+        // every node rather than only the ones that get linked. A node whose
+        // level-0 CAS loses the race is abandoned where it lies — the retry
+        // allocates a fresh one — so tying cleanup to reachability would leave
+        // exactly those behind. The arena owns the storage, so it owns the
+        // teardown.
+        arena.registerDestructor(n, [](void* p) { static_cast<Node*>(p)->~Node(); });
+
         return n;
     }
 };
