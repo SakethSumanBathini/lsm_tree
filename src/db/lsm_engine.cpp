@@ -103,9 +103,21 @@ void LSMEngine::flushMemtable() {
     SSTable::write(path, entries);
     sstables_.push_back(std::make_unique<SSTable>(path));
 
-    // Clear WAL and swap Memtable
+    // Build the replacement memtable before discarding the log.
+    //
+    // The order used to be clear-then-construct. make_unique can throw
+    // bad_alloc, and if it did the log was already gone while the old memtable
+    // still held every entry written since the last flush — live in RAM, backed
+    // by nothing. A crash at that point lost all of it, even though the data had
+    // been durably logged moments earlier.
+    //
+    // Allocating first means the only step after wal_.clear() is a move
+    // assignment of a unique_ptr, which cannot throw. The SSTable above is
+    // already written and registered, so the entries are durable before the log
+    // that describes them is dropped.
+    auto replacement = std::make_unique<Memtable>(memtable_max_bytes_);
     wal_.clear();
-    memtable_ = std::make_unique<Memtable>(memtable_max_bytes_);
+    memtable_ = std::move(replacement);
 
     // Run leveled compaction if necessary
     compactor_.run(sstables_, sst_counter_);
