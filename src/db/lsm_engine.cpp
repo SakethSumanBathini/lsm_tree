@@ -34,6 +34,25 @@ LSMEngine::LSMEngine(const std::string& data_dir, size_t memtable_max_bytes)
 }
 
 LSMEngine::~LSMEngine() {
+    // Persist whatever remains in the memtable before going away.
+    //
+    // Destruction used to release the lock and nothing else, so every entry
+    // written since the last flush was dropped on an ordinary, deliberate
+    // shutdown. The log was no help either: flushMemtable() clears the WAL on
+    // each flush, so the caller had to know to call flush() first — which
+    // nothing documents and nothing enforces.
+    //
+    // Failures are reported and swallowed. A destructor that throws during
+    // stack unwinding terminates the process, which is a worse outcome than the
+    // data loss it would be reporting.
+    try {
+        flush();
+    } catch (const std::exception& e) {
+        std::cerr << "[LSMEngine] flush during shutdown failed: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[LSMEngine] flush during shutdown failed" << std::endl;
+    }
+
     if (lock_fd_ >= 0) {
         flock(lock_fd_, LOCK_UN);
         close(lock_fd_);
