@@ -68,7 +68,17 @@ public:
 
     explicit SkipList(Arena& arena) : arena_(arena), head_(Node::create(arena_, "", std::nullopt, MAX_HEIGHT)) {}
 
-    void insert(const std::string& key, const std::optional<std::string>& value) {
+    // Outcome of an insert, so the caller can account for it correctly.
+    //
+    // Memtable tracks a byte total and an entry count, and previously had no
+    // way to distinguish a new key from an overwrite — insert() returned void,
+    // so every call was charged as if it added an entry.
+    struct InsertResult {
+        bool   inserted;             // true when a new key was linked in
+        size_t replacedValueBytes;   // bytes held by the value this call displaced
+    };
+
+    InsertResult insert(const std::string& key, const std::optional<std::string>& value) {
         Node* preds[MAX_HEIGHT];
         Node* succs[MAX_HEIGHT];
         
@@ -79,8 +89,9 @@ public:
                 // in practice, and the memtable is swapped atomically on flush.
                 // A direct store avoids inserting duplicate nodes, which would cause
                 // find() to return stale data (the first/oldest match).
+                const size_t replaced = succs[0]->value ? succs[0]->value->size() : 0;
                 succs[0]->value = value;
-                return;
+                return { false, replaced };
             }
 
             int height = randomHeight();
@@ -103,7 +114,7 @@ public:
                         find(key, preds, succs);
                     }
                 }
-                return;
+                return { true, 0 };
             }
             // If level 0 CAS fails, someone else inserted. Retry entire operation.
         }
@@ -146,15 +157,34 @@ public:
         : max_bytes_(max_bytes), current_bytes_(0), list_(arena_) {}
 
     void put(const std::string& key, const std::string& value) {
-        list_.insert(key, value);
-        current_bytes_.fetch_add(key.size() + value.size() + 8, std::memory_order_relaxed);
-        count_.fetch_add(1, std::memory_order_relaxed);
+        const auto result = list_.insert(key, value);
+
+        if (result.inserted) {
+            current_bytes_.fetch_add(key.size() + value.size() + 8, std::memory_order_relaxed);
+            count_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        // An overwrite adds no key and no entry. Only the value changed, so the
+        // byte total moves by the difference between the new value and the one
+        // it displaced. Charging the full key+value again — as this did before —
+        // inflated the total without bound under repeated updates to one key,
+        // driving isFull() true and forcing flushes the data did not warrant.
+        adjustValueBytes(result.replacedValueBytes, value.size());
     }
 
     void del(const std::string& key) {
-        list_.insert(key, std::nullopt);
-        current_bytes_.fetch_add(key.size() + 8, std::memory_order_relaxed);
-        count_.fetch_add(1, std::memory_order_relaxed);
+        const auto result = list_.insert(key, std::nullopt);
+
+        if (result.inserted) {
+            // A tombstone for a key not present still occupies a node.
+            current_bytes_.fetch_add(key.size() + 8, std::memory_order_relaxed);
+            count_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        // Tombstoning an existing key keeps the node and releases the value.
+        adjustValueBytes(result.replacedValueBytes, 0);
     }
 
     std::optional<std::optional<std::string>> get(const std::string& key) const {
@@ -167,6 +197,17 @@ public:
     }
 
     bool isFull() const { return current_bytes_.load(std::memory_order_relaxed) >= max_bytes_; }
+
+    // Applies the signed difference between two value sizes to the byte total.
+    // Split into add and subtract so neither operand is computed by subtracting
+    // a larger size_t from a smaller one.
+    void adjustValueBytes(size_t oldBytes, size_t newBytes) {
+        if (newBytes >= oldBytes) {
+            current_bytes_.fetch_add(newBytes - oldBytes, std::memory_order_relaxed);
+        } else {
+            current_bytes_.fetch_sub(oldBytes - newBytes, std::memory_order_relaxed);
+        }
+    }
     size_t size() const { return count_.load(std::memory_order_relaxed); }
     size_t byteSize() const { return current_bytes_.load(std::memory_order_relaxed); }
     bool empty() const { return size() == 0; }
