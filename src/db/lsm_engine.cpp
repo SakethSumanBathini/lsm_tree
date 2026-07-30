@@ -18,17 +18,11 @@ struct SSTFile {
 LSMEngine::LSMEngine(const std::string& data_dir, size_t memtable_max_bytes)
     : data_dir_(data_dir)
     , memtable_max_bytes_(memtable_max_bytes)
-    , wal_(ensureDir(data_dir) + "/wal.log")
+    , lock_fd_(acquireDirectoryLock(ensureDir(data_dir)))
+    , wal_(data_dir + "/wal.log")
     , memtable_(std::make_unique<Memtable>(memtable_max_bytes))
     , compactor_(data_dir)
 {
-    // Acquire exclusive flock
-    lock_fd_ = open((data_dir + "/LOCK").c_str(), O_CREAT | O_RDWR, 0644);
-    if (lock_fd_ < 0 || flock(lock_fd_, LOCK_EX | LOCK_NB) != 0) {
-        if (lock_fd_ >= 0) close(lock_fd_);
-        throw std::runtime_error("LSMEngine: failed to acquire lock on " + data_dir);
-    }
-
     recoverFromWAL();
     loadSSTables();
 }
@@ -57,6 +51,18 @@ LSMEngine::~LSMEngine() {
         flock(lock_fd_, LOCK_UN);
         close(lock_fd_);
     }
+}
+
+int LSMEngine::acquireDirectoryLock(const std::string& dir) {
+    // Called from the initialiser list so it completes before wal_ is built,
+    // which is what stops a second process creating or appending to wal.log
+    // while it is still waiting to be refused the lock.
+    int fd = open((dir + "/LOCK").c_str(), O_CREAT | O_RDWR, 0644);
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (fd >= 0) close(fd);
+        throw std::runtime_error("LSMEngine: failed to acquire lock on " + dir);
+    }
+    return fd;
 }
 
 const std::string& LSMEngine::ensureDir(const std::string& dir) {
