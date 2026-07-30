@@ -6,6 +6,32 @@
 #include <cstring>
 
 void SSTable::write(const std::string& path, const std::vector<Entry>& entries) {
+    // Sorted, unique input is a precondition, so it is checked rather than
+    // assumed.
+    //
+    // The sparse index samples every ENTRIES_PER_BLOCK-th key, and findBlock()
+    // binary-searches that index; get() then scans forward from the block it
+    // lands on, stopping early once it passes the target key. All three depend
+    // on the entries being ordered. Unsorted input does not fail loudly — it
+    // produces a well-formed file whose index is wrong, so reads return "not
+    // found" for keys that are present, and the corruption is only visible much
+    // later at query time.
+    //
+    // Duplicates are rejected too: two entries with the same key make the block
+    // a value resolves to ambiguous, and both existing callers already
+    // guarantee uniqueness — the compactor merges through a std::map, and
+    // flushMemtable iterates a skiplist.
+    //
+    // Validated before the file is opened, so an invalid call leaves nothing
+    // behind on disk.
+    for (size_t i = 1; i < entries.size(); ++i) {
+        if (!(entries[i - 1].key < entries[i].key)) {
+            throw std::runtime_error(
+                "SSTable: entries must be sorted by key and unique; '" + entries[i - 1].key +
+                "' is not less than '" + entries[i].key + "' at position " + std::to_string(i));
+        }
+    }
+
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out.is_open())
         throw std::runtime_error("SSTable: cannot create file: " + path);
