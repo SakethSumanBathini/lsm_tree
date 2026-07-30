@@ -23,6 +23,11 @@ public:
     explicit SSTable(const std::string& path);
     ~SSTable();
 
+    SSTable(const SSTable&) = delete;
+    SSTable& operator=(const SSTable&) = delete;
+    SSTable(SSTable&& other) noexcept;
+    SSTable& operator=(SSTable&& other) noexcept;
+
     std::optional<std::optional<std::string>> get(const std::string& key) const;
     std::vector<Entry> readAll() const;
     std::unique_ptr<SSTableIterator> createIterator() const;
