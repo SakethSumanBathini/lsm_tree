@@ -11,6 +11,7 @@ echo "Running Unit Tests..."
 ./build/test_wal_recovery
 ./build/test_sstable
 ./build/test_compaction_streaming
+./build/test_block_cache
 
 echo "Running Benchmarks..."
 ./build/bench_write
