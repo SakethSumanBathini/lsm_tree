@@ -8,7 +8,7 @@
 
 class SSTable {
 public:
-    static constexpr size_t ENTRIES_PER_BLOCK = 64;
+    static constexpr size_t TARGET_BLOCK_SIZE = 4096;
 
     struct Entry {
         std::string key;
