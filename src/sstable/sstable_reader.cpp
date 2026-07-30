@@ -82,6 +82,44 @@ std::vector<SSTable::Entry> SSTable::readAll() const {
     return entries;
 }
 
+SSTableIterator::SSTableIterator(const std::string& path, uint64_t data_end_offset)
+    : in_(path, std::ios::binary), data_end_offset_(data_end_offset) {
+    advance();
+}
+
+void SSTableIterator::advance() {
+    if (in_.is_open() && static_cast<uint64_t>(in_.tellg()) < data_end_offset_ && in_.peek() != EOF) {
+        uint8_t is_tombstone = 0;
+        in_.read(reinterpret_cast<char*>(&is_tombstone), 1);
+        uint32_t key_len = 0;
+        in_.read(reinterpret_cast<char*>(&key_len), 4);
+        std::string key(key_len, '\0');
+        in_.read(key.data(), key_len);
+
+        uint32_t val_len = 0;
+        in_.read(reinterpret_cast<char*>(&val_len), 4);
+        std::string val(val_len, '\0');
+        in_.read(val.data(), val_len);
+
+        SSTable::Entry e;
+        e.key = std::move(key);
+        e.value = is_tombstone ? std::nullopt : std::optional<std::string>(std::move(val));
+        current_ = std::move(e);
+    } else {
+        current_ = std::nullopt;
+    }
+}
+
+SSTable::Entry SSTableIterator::next() {
+    SSTable::Entry res = std::move(*current_);
+    advance();
+    return res;
+}
+
+std::unique_ptr<SSTableIterator> SSTable::createIterator() const {
+    return std::make_unique<SSTableIterator>(path_, index_offset_);
+}
+
 uint64_t SSTable::findBlock(const std::string& key) const {
     if (index_.empty()) return 0;
     int lo = 0, hi = static_cast<int>(index_.size()) - 1;

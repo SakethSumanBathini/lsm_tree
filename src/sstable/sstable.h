@@ -5,6 +5,9 @@
 #include <optional>
 #include <memory>
 #include <cstdint>
+#include <fstream>
+
+class SSTableIterator;
 
 class SSTable {
 public:
@@ -21,10 +24,12 @@ public:
 
     std::optional<std::optional<std::string>> get(const std::string& key) const;
     std::vector<Entry> readAll() const;
+    std::unique_ptr<SSTableIterator> createIterator() const;
 
     const std::string& smallestKey() const { return smallest_key_; }
     const std::string& largestKey()  const { return largest_key_; }
     const std::string& path()        const { return path_; }
+    uint64_t indexOffset()            const { return index_offset_; }
 
 private:
     std::string path_;
@@ -49,4 +54,20 @@ private:
 
     static void serializeBloom(std::ofstream& out, const BloomFilter& bf);
     static std::unique_ptr<BloomFilter> deserializeBloom(std::ifstream& in);
+};
+
+class SSTableIterator {
+public:
+    SSTableIterator(const std::string& path, uint64_t data_end_offset);
+
+    bool hasNext() const { return current_.has_value(); }
+    SSTable::Entry peek() const { return *current_; }
+    SSTable::Entry next();
+
+private:
+    std::ifstream in_;
+    uint64_t data_end_offset_;
+    std::optional<SSTable::Entry> current_;
+
+    void advance();
 };

@@ -10,6 +10,7 @@ echo "Running Unit Tests..."
 ./build/test_bloom_filter
 ./build/test_wal_recovery
 ./build/test_sstable
+./build/test_compaction_streaming
 
 echo "Running Benchmarks..."
 ./build/bench_write
