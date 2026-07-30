@@ -29,7 +29,4 @@ jobs:
       run: |
         ./build/test_skip_list
         ./build/test_bloom_filter
-        # Note: test_wal_recovery uses O_DIRECT, which is supported on GitHub Actions runners,
-        # but io_uring might need elevated privileges or fail on older kernels.
-        # We run it and log warnings if skipped.
-        ./build/test_wal_recovery || echo "WAL test warning: io_uring might be blocked by runner container environment."
+        ./build/test_wal_recovery
