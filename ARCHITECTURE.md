@@ -16,7 +16,7 @@ To guarantee durability before returning a successful write to the client, every
 ### Concurrent MemTable (SkipList)
 Once logged, the key-value pair is inserted into the memory table (MemTable), which is built on a concurrent lock-free **SkipList**:
 - **Lock-Free CAS Updates**: Insertion links node pointers dynamically using atomic Compare-And-Swap (`compare_exchange_weak`/`compare_exchange_strong`) operations. This allows multiple threads to insert entries concurrently without locking the index structure.
-- **In-Place Overwrite Semantics**: If a key already exists, threads perform an atomic store of the new value pointer in the existing node, avoiding duplicate nodes and preventing stale read results.
+- **In-Place Overwrite Semantics**: If a key already exists, threads perform a direct in-place update of the value (`succs[0]->value = value`) in the existing node, avoiding duplicate nodes and preventing stale read results.
 - **Thread-Safe Arena Bump Allocator**: To avoid malloc memory overhead, nodes are allocated from a custom bump-pointer `Arena`. Memory is allocated in chunks (1MB) and protected by a mutex lock, which serializes allocation while keeping SkipList traversals lock-free.
 - **Thread-Local Height Generation**: Height generation uses a `thread_local` random number generator (`std::mt19937`), eliminating lock contention on shared seed variables.
 
