@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
+#include <cerrno>
 
 std::vector<WAL::Entry> WAL::recover() const {
     // Recovery reads the entire WAL file into memory and parses entries.
@@ -15,7 +17,28 @@ std::vector<WAL::Entry> WAL::recover() const {
     std::vector<char> buf;
     char tmp[4096];
     ssize_t bytes;
-    while ((bytes = read(rfd, tmp, sizeof(tmp))) > 0) {
+    while (true) {
+        bytes = read(rfd, tmp, sizeof(tmp));
+
+        // A signal delivered mid-read returns -1/EINTR without having failed.
+        // The old loop exited on any non-positive result, so an interrupted
+        // read silently truncated the log — recovery then treated whatever had
+        // been read so far as the whole file and discarded every entry after
+        // the interruption. Retrying is the correct response; the read has not
+        // actually gone wrong.
+        if (bytes < 0) {
+            if (errno == EINTR) continue;
+
+            // A real read error. Returning what we have would present a partial
+            // log as a complete one, so refuse instead.
+            const int err = errno;
+            close(rfd);
+            throw std::runtime_error(std::string("WAL: read failed during recovery: ") +
+                                     std::strerror(err));
+        }
+
+        if (bytes == 0) break;   // end of file
+
         buf.insert(buf.end(), tmp, tmp + bytes);
     }
     close(rfd);
@@ -62,6 +85,23 @@ std::vector<WAL::Entry> WAL::recover() const {
         }
 
         Entry e;
+        // Only the two defined type bytes are accepted.
+        //
+        // This was `(type == 0x01) ? PUT : DEL`, so every byte that wasn't 0x01
+        // — 0x00, 0x03, 0xFF, anything — became a deletion. A record that
+        // passes CRC but carries an unrecognised type is a record written by a
+        // format this build doesn't know, and turning it into a tombstone
+        // deletes a key the log never asked to delete. Skipping to the next
+        // block is the same treatment the CRC-mismatch path gives.
+        if (type != 0x01 && type != 0x02) {
+            std::cerr << "WAL: entry at offset " << entry_start
+                      << " has unrecognised type byte 0x" << std::hex
+                      << static_cast<int>(type) << std::dec
+                      << "; skipping rather than treating it as a delete.\n";
+            offset = ((entry_start / 512) + 1) * 512;
+            continue;
+        }
+
         e.type = (type == 0x01) ? Entry::Type::PUT : Entry::Type::DEL;
         e.key = key;
         e.value = value;
