@@ -13,12 +13,18 @@ void SSTable::write(const std::string& path, const std::vector<Entry>& entries) 
     BloomFilter bloom(std::max(entries.size(), size_t(1)));
     std::vector<std::pair<std::string, uint64_t>> index;
 
+    uint64_t current_block_bytes = 0;
     for (size_t i = 0; i < entries.size(); ++i) {
-        if (i % ENTRIES_PER_BLOCK == 0)
+        size_t entry_bytes = 1 + 4 + entries[i].key.size() + 4 + (entries[i].value.has_value() ? entries[i].value->size() : 0);
+
+        if (i == 0 || current_block_bytes >= TARGET_BLOCK_SIZE) {
             index.push_back({entries[i].key, static_cast<uint64_t>(out.tellp())});
+            current_block_bytes = 0;
+        }
 
         bloom.insert(entries[i].key);
         writeEntry(out, entries[i]);
+        current_block_bytes += entry_bytes;
     }
 
     uint64_t index_offset = static_cast<uint64_t>(out.tellp());
