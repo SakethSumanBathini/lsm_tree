@@ -7,6 +7,18 @@
 #include <cerrno>
 
 std::vector<WAL::Entry> WAL::recover() const {
+    // Held for the whole read.
+    //
+    // recover() is const and previously took no lock, so it could open and read
+    // path_ while clear() was unlinking and recreating that same file, or while
+    // writeEntry() was appending to it. Either overlap hands recovery a file
+    // that is being replaced underneath it — a partial read, or a read of a log
+    // that no longer represents the engine's state.
+    //
+    // mu_ is mutable, so a const method can take it, and it is the same mutex
+    // writeEntry() and clear() already hold.
+    std::lock_guard<std::mutex> lock(mu_);
+
     // Recovery reads the entire WAL file into memory and parses entries.
     // Uses regular O_RDONLY (not O_DIRECT) since recovery is a one-time startup cost
     // and avoids O_DIRECT alignment constraints that complicate cross-block reads.
