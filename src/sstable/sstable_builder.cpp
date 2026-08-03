@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <limits>
 
 void SSTable::write(const std::string& path, const std::vector<Entry>& entries) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -28,6 +29,9 @@ void SSTable::write(const std::string& path, const std::vector<Entry>& entries) 
     }
 
     uint64_t index_offset = static_cast<uint64_t>(out.tellp());
+    if (index.size() > std::numeric_limits<uint32_t>::max()) {
+        throw std::length_error("SSTable: index entry count exceeds uint32_t");
+    }
     uint32_t index_count  = static_cast<uint32_t>(index.size());
     writeUint32(out, index_count);
     for (auto& [key, offset] : index) {
@@ -59,6 +63,15 @@ void SSTable::writeEntry(std::ofstream& out, const Entry& e) {
 }
 
 void SSTable::writeString(std::ofstream& out, const std::string& s) {
+    // Same 4 GiB ceiling as the WAL: the length field is uint32_t, so a longer
+    // string would be written in full but recorded with a truncated length, and
+    // every subsequent read of the file would be misaligned.
+    if (s.size() > std::numeric_limits<uint32_t>::max()) {
+        throw std::length_error(
+            "SSTable: string exceeds the 4 GiB limit imposed by the on-disk "
+            "length field (" + std::to_string(s.size()) + " bytes)");
+    }
+
     uint32_t len = static_cast<uint32_t>(s.size());
     out.write(reinterpret_cast<const char*>(&len), 4);
     out.write(s.data(), len);
