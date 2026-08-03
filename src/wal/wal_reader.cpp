@@ -1,6 +1,7 @@
 #include "wal.h"
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -24,6 +25,31 @@ std::vector<WAL::Entry> WAL::recover() const {
     // and avoids O_DIRECT alignment constraints that complicate cross-block reads.
     int rfd = open(path_.c_str(), O_RDONLY);
     if (rfd < 0) return {};
+
+    // Refuse a log too large to hold, rather than being killed trying.
+    //
+    // Recovery reads the whole file into one contiguous buffer, so a multi-GB
+    // log means a multi-GB allocation. The failure mode without this check is
+    // the OOM killer terminating the process mid-startup — no diagnostic, no
+    // indication which file was responsible, and a restart loop that repeats it.
+    //
+    // A log should never approach this size in normal operation: flushMemtable()
+    // calls wal_.clear() after every flush, so the log is bounded by the
+    // memtable threshold. A file this large means flushes have been failing, and
+    // that is the condition worth surfacing — the size is the symptom.
+    //
+    // The bound is checked with fstat before any allocation, so an oversized log
+    // costs nothing to reject.
+    struct stat st;
+    if (fstat(rfd, &st) == 0 && static_cast<uint64_t>(st.st_size) > MAX_RECOVERY_BYTES) {
+        const off_t size = st.st_size;
+        close(rfd);
+        throw std::runtime_error(
+            "WAL: refusing to recover " + std::to_string(size) + " byte log; the limit is " +
+            std::to_string(MAX_RECOVERY_BYTES) +
+            " bytes. A log this large means memtable flushes have not been "
+            "clearing it — investigate flush failures before recovering.");
+    }
 
     // Read entire file into a contiguous buffer
     std::vector<char> buf;
@@ -50,6 +76,16 @@ std::vector<WAL::Entry> WAL::recover() const {
         }
 
         if (bytes == 0) break;   // end of file
+
+        // Backstop for the fstat check above: a log being appended to while
+        // recovery reads it can outgrow the size reported at open, and fstat
+        // can fail outright on an unusual filesystem.
+        if (buf.size() + static_cast<size_t>(bytes) > MAX_RECOVERY_BYTES) {
+            close(rfd);
+            throw std::runtime_error(
+                "WAL: log exceeded the " + std::to_string(MAX_RECOVERY_BYTES) +
+                " byte recovery limit while being read");
+        }
 
         buf.insert(buf.end(), tmp, tmp + bytes);
     }
