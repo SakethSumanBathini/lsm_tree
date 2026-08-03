@@ -21,7 +21,7 @@ if(NOT APPLE)
         src/compaction/leveled_compactor.cpp
         src/db/lsm_engine.cpp
     )
-    target_include_directories(lsm_core PUBLIC src)
+    target_include_directories(lsm_core PUBLIC src ${URING_INCLUDE_DIRS})
     target_link_libraries(lsm_core PUBLIC ${URING_LIBRARIES} Threads::Threads)
 
     # Unit Tests targets
