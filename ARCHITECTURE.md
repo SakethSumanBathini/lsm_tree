@@ -47,4 +47,4 @@ To prevent costly disk reads for keys not in the database, each SSTable maintain
 When Level 0 accumulates 4 or more SSTables, a compaction sweep is triggered to transition them into Level 1:
 1. **Deduplication and Purge**: All active Level 0 and Level 1 files are opened. The compactor reads their entries, keeping only the newest update for each key and discarding tombstones.
 2. **File Partitioning**: Merged entries are segmented into non-overlapping blocks of 1,000 records.
-3. **Atomic Commit**: Each block is written out as a new Level 1 file (`sst-1-xxxxxx.sst`), and the old files are deleted.
+3. **Atomic Staged Commit**: Merged tables are written to temporary `.tmp` files and `fsync`ed to disk. Each `.tmp` file is then atomically renamed to its final Level 1 path (`sst-1-xxxxxx.sst`), ensuring crash-consistency before old input SSTables are unlinked.
