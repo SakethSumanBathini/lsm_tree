@@ -9,6 +9,7 @@ echo "Running Unit Tests..."
 ./build/test_skip_list
 ./build/test_bloom_filter
 ./build/test_wal_recovery
+./build/test_sstable
 
 echo "Running Benchmarks..."
 ./build/bench_write

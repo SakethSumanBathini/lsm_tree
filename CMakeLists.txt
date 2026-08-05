@@ -23,7 +23,7 @@ if(NOT APPLE)
         src/compaction/leveled_compactor.cpp
         src/db/lsm_engine.cpp
     )
-    target_include_directories(lsm_core PUBLIC src)
+    target_include_directories(lsm_core PUBLIC src ${URING_INCLUDE_DIRS})
     target_link_libraries(lsm_core PUBLIC ${URING_LIBRARIES} Threads::Threads)
 
     # Unit Tests targets
@@ -36,12 +36,22 @@ if(NOT APPLE)
     add_executable(test_wal_recovery tests/test_wal_recovery.cpp)
     target_link_libraries(test_wal_recovery PRIVATE lsm_core)
 
+    add_executable(test_sstable tests/test_sstable.cpp)
+    target_link_libraries(test_sstable PRIVATE lsm_core)
+
     # Benchmark targets
     add_executable(bench_write benchmarks/bench_write.cpp)
     target_link_libraries(bench_write PRIVATE lsm_core)
 
     add_executable(bench_read benchmarks/bench_read.cpp)
     target_link_libraries(bench_read PRIVATE lsm_core)
+
+    add_executable(bench_block_bottleneck benchmarks/bench_block_bottleneck.cpp)
+    target_link_libraries(bench_block_bottleneck PRIVATE lsm_core)
+
+    # Interactive CLI Tool
+    add_executable(lsm_cli tools/lsm_cli.cpp)
+    target_link_libraries(lsm_cli PRIVATE lsm_core)
 
 else()
     message(FATAL_ERROR "This project requires Linux for native io_uring and O_DIRECT support.")
