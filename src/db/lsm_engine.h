@@ -14,7 +14,15 @@ public:
     explicit LSMEngine(const std::string& data_dir, size_t memtable_max_bytes = Memtable::DEFAULT_MAX_BYTES);
     ~LSMEngine();
 
-    static const std::string& ensureDir(const std::string& dir);
+    // Returns by value, not by reference.
+    //
+    // This returned `const std::string&` bound to its own parameter, so
+    // `ensureDir(makePath())` produced a reference to a temporary that died at
+    // the end of the full expression. The single call site in the constructor
+    // passes a named parameter and is safe, but the function is public and
+    // static — nothing stopped a caller elsewhere from passing a temporary, and
+    // neither -Wall nor -Wextra warns about it.
+    static std::string ensureDir(const std::string& dir);
 
     void put(const std::string& key, const std::string& value);
     void del(const std::string& key);
