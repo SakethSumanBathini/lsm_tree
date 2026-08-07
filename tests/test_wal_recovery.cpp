@@ -1,4 +1,5 @@
 #include "../src/db/lsm_engine.h"
+#include "../src/wal/wal.h"
 #include <iostream>
 #include <cassert>
 #include <filesystem>
@@ -18,12 +19,18 @@ int main() {
     std::cout << "  Running Unit Test: WAL Recovery & Checks\n";
     std::cout << "===========================================\n";
 
+    // Write the log directly rather than through the engine.
+    //
+    // This block and the corruption block below both need a WAL that still
+    // holds its records. Destroying an LSMEngine no longer leaves one, because
+    // shutdown now flushes — so producing the log through the WAL itself is
+    // what actually models a process that died before flushing.
     std::filesystem::remove_all("/tmp/lsm_test_wal");
+    std::filesystem::create_directories("/tmp/lsm_test_wal");
     {
-        LSMEngine db("/tmp/lsm_test_wal");
-        db.put("keyA", "dataA");
-        db.put("keyB", "dataB");
-        // Simulated crash (no flush or clean shutdown)
+        WAL wal("/tmp/lsm_test_wal/wal.log");
+        wal.logPut("keyA", "dataA");
+        wal.logPut("keyB", "dataB");
     }
 
     // Re-open and verify recovered entries
@@ -39,10 +46,11 @@ int main() {
 
     // CRC Corruption Test
     std::filesystem::remove_all("/tmp/lsm_test_wal_corrupt");
+    std::filesystem::create_directories("/tmp/lsm_test_wal_corrupt");
     {
-        LSMEngine db("/tmp/lsm_test_wal_corrupt");
-        db.put("safe_key", "good_data");
-        db.put("corrupt_key", "corrupt_data");
+        WAL wal("/tmp/lsm_test_wal_corrupt/wal.log");
+        wal.logPut("safe_key", "good_data");
+        wal.logPut("corrupt_key", "corrupt_data");
     }
 
     // Corrupt a byte in the second entry of the WAL file

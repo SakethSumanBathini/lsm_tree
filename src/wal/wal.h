@@ -8,6 +8,14 @@
 // WAL (Write-Ahead Log) using Linux io_uring for Asynchronous Zero-Copy Logging.
 class WAL {
 public:
+    // Largest log recover() will read into memory.
+    //
+    // Recovery buffers the whole file, so this bounds the allocation. 1 GiB is
+    // far above any log a healthy engine produces — flushMemtable() clears the
+    // WAL after every flush — while staying small enough to allocate on a
+    // modest machine. Exceeding it throws rather than risking the OOM killer.
+    static constexpr uint64_t MAX_RECOVERY_BYTES = 1ULL << 30;   // 1 GiB
+
     struct Entry {
         enum class Type { PUT = 0x01, DEL = 0x02 };
         Type        type;
