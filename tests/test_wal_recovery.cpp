@@ -82,6 +82,26 @@ int main() {
         pass("Checksum Verification: corrupted entries successfully skipped");
     }
 
+    // Fast Destruction In-Flight Completion Test (Issue #120)
+    std::filesystem::remove_all("/tmp/lsm_test_wal_inflight");
+    std::filesystem::create_directories("/tmp/lsm_test_wal_inflight");
+    std::string test_log_path = "/tmp/lsm_test_wal_inflight/wal.log";
+    {
+        WAL wal(test_log_path);
+        for (int i = 0; i < 50; ++i) {
+            wal.logPut("k" + std::to_string(i), "v" + std::to_string(i));
+        }
+        // Destruct wal immediately without sleep to ensure drain() harvests all 50 CQEs
+    }
+    {
+        WAL wal(test_log_path);
+        auto recovered = wal.recover();
+        if (recovered.size() != 50) {
+            fail("In-Flight WAL Drain", "Expected 50 entries recovered but got " + std::to_string(recovered.size()));
+        }
+        pass("Fast Destructor Drain: recovered 50 of 50 in-flight entries");
+    }
+
     std::cout << "\033[32mWAL Recovery tests passed successfully.\033[0m\n\n";
     return 0;
 }
