@@ -47,16 +47,26 @@ private:
 
     std::string data_dir_;
     size_t memtable_max_bytes_;
+
+    // Declared — and so acquired — before wal_.
+    //
+    // Members initialise in declaration order, and wal_ opens the log, creating
+    // it if absent. With the lock taken afterwards in the constructor body, two
+    // processes could both reach and modify wal.log before either attempted the
+    // flock, so the one about to be refused had already touched the log.
+    int lock_fd_ = -1;
+
     WAL         wal_;
     std::unique_ptr<Memtable> memtable_;
     std::vector<std::unique_ptr<SSTable>> sstables_;
     int sst_counter_ = 0;
-    int lock_fd_ = -1;
     LeveledCompactor compactor_;
 
     // Requires the caller to already hold mu_ exclusively. Called from put(),
     // del() and flush(), all of which take that lock — taking it again here
     // would deadlock, since std::shared_mutex is not recursive.
+    static int acquireDirectoryLock(const std::string& dir);
+
     void flushMemtable();
     void recoverFromWAL();
     void loadSSTables();

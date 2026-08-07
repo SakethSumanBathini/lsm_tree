@@ -17,8 +17,35 @@ SSTable::SSTable(const std::string& path) : path_(path) {
     uint64_t bloom_offset = readUint64(in);
     index_offset_ = index_offset;
 
+    // index_offset and bloom_offset are read from the footer, so they are as
+    // untrusted as anything else on disk. A corrupted pair sends the seeks
+    // below to arbitrary positions.
+    if (index_offset > file_size || bloom_offset > file_size || index_offset > bloom_offset) {
+        throw std::runtime_error("SSTable: footer offsets fall outside the file: " + path);
+    }
+
     in.seekg(index_offset);
     uint32_t index_count = readUint32(in);
+
+    // Bound the count by what the index region can physically hold.
+    //
+    // index_.resize(index_count) previously took a 32-bit value straight from
+    // disk, so a corrupted count reserved up to 4 billion entries before a
+    // single one was read — the std::bad_alloc this issue describes.
+    //
+    // Every entry costs at least a 4-byte key length, zero key bytes, and an
+    // 8-byte block offset, so twelve bytes is the floor. The region runs from
+    // just past the count to the start of the bloom section. Dividing rather
+    // than multiplying keeps the comparison free of any product that could
+    // overflow.
+    constexpr uint64_t kMinIndexEntryBytes = 4 + 8;
+    const uint64_t index_region = bloom_offset - index_offset;
+    const uint64_t available = index_region >= 4 ? index_region - 4 : 0;
+
+    if (static_cast<uint64_t>(index_count) > available / kMinIndexEntryBytes) {
+        throw std::runtime_error("SSTable: index entry count exceeds file contents: " + path);
+    }
+
     index_.resize(index_count);
     for (auto& [key, offset] : index_) {
         key    = readString(in);
@@ -42,21 +69,25 @@ std::optional<std::optional<std::string>> SSTable::get(const std::string& key) c
     if (!bloom_->mayContain(key))
         return std::nullopt;
 
-    uint64_t block_offset = findBlock(key);
+    if (index_.empty()) return std::nullopt;
+
+    int lo = 0, hi = static_cast<int>(index_.size()) - 1;
+    while (lo < hi) {
+        int mid = lo + (hi - lo + 1) / 2;
+        if (index_[mid].first <= key) lo = mid;
+        else hi = mid - 1;
+    }
+
+    uint64_t block_start_offset = index_[lo].second;
+    uint64_t block_end_offset   = (static_cast<size_t>(lo + 1) < index_.size())
+                                  ? index_[lo + 1].second
+                                  : index_offset_;
+
     std::ifstream in(path_, std::ios::binary);
     if (!in.is_open()) return std::nullopt;
 
-    // The loop must stop at the end of the data region, not at end of file.
-    // Past the last data entry the file still holds the index, the bloom filter
-    // and the footer, so `peek() != EOF` stays true and readEntry() goes on to
-    // interpret those bytes as entries — decoding arbitrary values as string
-    // lengths. Bounding on index_offset_ is what readAll() already does.
-    in.seekg(block_offset);
-    for (size_t i = 0;
-         i < ENTRIES_PER_BLOCK
-           && static_cast<uint64_t>(in.tellg()) < index_offset_
-           && in.peek() != EOF;
-         ++i) {
+    in.seekg(block_start_offset);
+    while (static_cast<uint64_t>(in.tellg()) < block_end_offset && in.peek() != EOF) {
         Entry e = readEntry(in);
         if (e.key == key) return e.value;
         if (e.key > key)  return std::nullopt;
