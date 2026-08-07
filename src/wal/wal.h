@@ -46,9 +46,13 @@ private:
     // records and the next writeEntry() reports.
     std::string failure_;
 
+    // Outstanding submitted CQEs in-flight that must be reaped before exiting ring.
+    size_t pending_cqes_ = 0;
+
     void recordFailure(const std::string& detail);
 
     void writeEntry(Entry::Type type, const std::string& key, const std::string& value);
     void reap();
+    void drain();
     static uint32_t crc32(uint8_t type, const std::string& key, const std::string& value);
 };

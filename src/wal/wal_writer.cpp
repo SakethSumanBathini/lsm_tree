@@ -21,7 +21,7 @@ WAL::WAL(const std::string& path) : path_(path) {
 WAL::~WAL() {
     {
         std::lock_guard<std::mutex> lock(mu_);
-        reap();
+        drain();
     }
     // Ensure all writes are durable on disk before closing.
     if (fd_ >= 0) fdatasync(fd_);
@@ -42,7 +42,7 @@ void WAL::logDel(const std::string& key) {
 
 void WAL::clear() {
     std::lock_guard<std::mutex> lock(mu_);
-    reap();                     // drain any pending CQEs
+    drain();                     // drain all pending in-flight CQEs synchronously
 
     // Every handle is marked released as it is released, and the removal uses
     // the non-throwing overload. The previous ordering exited the ring and
@@ -76,6 +76,7 @@ void WAL::clear() {
         throw std::runtime_error("WAL: failed to re-init io_uring after clear");
     }
     ring_ready_ = true;
+    pending_cqes_ = 0;
 }
 
 void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string& value) {
@@ -123,6 +124,9 @@ void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string
             throw std::runtime_error(std::string("WAL: io_uring_submit failed while draining: ")
                                      + std::strerror(-flushed));
         }
+        if (flushed > 0) {
+            pending_cqes_ += static_cast<size_t>(flushed);
+        }
         reap();
         sqe = io_uring_get_sqe(&ring_);
         if (!sqe) {
@@ -166,6 +170,9 @@ void WAL::writeEntry(Entry::Type type, const std::string& key, const std::string
         throw std::runtime_error(std::string("WAL: io_uring_submit failed: ")
                                  + std::strerror(-submitted));
     }
+    if (submitted > 0) {
+        pending_cqes_ += static_cast<size_t>(submitted);
+    }
 
     // Reap any completed CQEs (non-blocking) to free buffers promptly
     reap();
@@ -203,6 +210,32 @@ void WAL::reap() {
         }
 
         io_uring_cqe_seen(&ring_, cqe);
+        if (pending_cqes_ > 0) {
+            --pending_cqes_;
+        }
+    }
+}
+
+void WAL::drain() {
+    reap();
+    while (pending_cqes_ > 0 && ring_ready_) {
+        struct __kernel_timespec ts;
+        ts.tv_sec = 5;
+        ts.tv_nsec = 0;
+
+        struct io_uring_cqe* cqe = nullptr;
+        int ret = io_uring_wait_cqe_timeout(&ring_, &cqe, &ts);
+
+        if (ret == -EINTR) {
+            continue;
+        }
+
+        if (ret < 0) {
+            recordFailure("drain wait failed or timed out: " + std::string(std::strerror(-ret)));
+            break;
+        }
+
+        reap();
     }
 }
 
