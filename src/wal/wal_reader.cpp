@@ -108,12 +108,36 @@ std::vector<WAL::Entry> WAL::recover() const {
             continue;
         }
 
-        if (offset + 8 > total) break;
+        // A truncated or corrupted length header is skipped, not fatal.
+        //
+        // Both checks below used to `break`, abandoning the remainder of the
+        // log and discarding every valid entry after the damaged one — the
+        // opposite of what recovery is for. It was also inconsistent with how
+        // this same loop already handles its two other corruption cases: the
+        // padding branch above and the CRC mismatch below both advance to the
+        // next 512-byte boundary and continue.
+        //
+        // Entries are written as 512-byte aligned blocks, so that boundary is
+        // where the next record begins. Advancing there resynchronises with the
+        // record stream rather than giving up on it, and always moves forward,
+        // so the loop still terminates.
+        if (offset + 8 > total) {
+            offset = ((entry_start / 512) + 1) * 512;
+            continue;
+        }
+
         uint32_t klen, vlen;
         std::memcpy(&klen, buf.data() + offset, 4); offset += 4;
         std::memcpy(&vlen, buf.data() + offset, 4); offset += 4;
 
-        if (offset + klen + vlen + 4 > total) break;
+        if (offset + klen + vlen + 4 > total) {
+            std::cerr << "WAL: entry at offset " << entry_start
+                      << " declares a length past the end of the log (klen=" << klen
+                      << ", vlen=" << vlen << "). Skipping corrupted entry.\n";
+            offset = ((entry_start / 512) + 1) * 512;
+            continue;
+        }
+
         std::string key(buf.data() + offset, klen); offset += klen;
         std::string value(buf.data() + offset, vlen); offset += vlen;
 
