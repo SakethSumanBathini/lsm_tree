@@ -66,7 +66,7 @@ int LSMEngine::acquireDirectoryLock(const std::string& dir) {
     return fd;
 }
 
-const std::string& LSMEngine::ensureDir(const std::string& dir) {
+std::string LSMEngine::ensureDir(const std::string& dir) {
     std::filesystem::create_directories(dir);
     return dir;
 }
