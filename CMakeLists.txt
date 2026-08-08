@@ -26,15 +26,21 @@ if(NOT APPLE)
     target_include_directories(lsm_core PUBLIC src ${URING_INCLUDE_DIRS})
     target_link_libraries(lsm_core PUBLIC ${URING_LIBRARIES} Threads::Threads)
 
+    # Enable CTest integration
+    enable_testing()
+
     # Unit Tests targets
     add_executable(test_skip_list tests/test_skip_list.cpp)
     target_link_libraries(test_skip_list PRIVATE lsm_core)
+    add_test(NAME test_skip_list COMMAND test_skip_list)
 
     add_executable(test_bloom_filter tests/test_bloom_filter.cpp)
     target_link_libraries(test_bloom_filter PRIVATE lsm_core)
+    add_test(NAME test_bloom_filter COMMAND test_bloom_filter)
 
     add_executable(test_wal_recovery tests/test_wal_recovery.cpp)
     target_link_libraries(test_wal_recovery PRIVATE lsm_core)
+    add_test(NAME test_wal_recovery COMMAND test_wal_recovery)
 
     add_executable(test_sstable tests/test_sstable.cpp)
     target_link_libraries(test_sstable PRIVATE lsm_core)
