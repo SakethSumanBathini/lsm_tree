@@ -4,21 +4,10 @@ project(lsm_tree CXX)
 if(NOT APPLE)
     set(CMAKE_CXX_STANDARD 17)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    # Default to Release without overriding an explicit choice.
-    #
-    # A bare set() clobbered whatever the developer passed on the command line, so
-    # -DCMAKE_BUILD_TYPE=Debug silently produced a Release build and the sanitizer
-    # and debug workflows the tests rely on could not be selected at all.
     if(NOT CMAKE_BUILD_TYPE)
-        set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
     endif()
-
-    # CMAKE_CXX_FLAGS_RELEASE is left at CMake's default, which is "-O3 -DNDEBUG".
-    #
-    # It was previously set to "-O3" alone. That is the same optimisation level but
-    # drops -DNDEBUG, so assert() stays live in Release builds — the release binary
-    # keeps paying for checks it is meant to have compiled out, and an assertion
-    # failure aborts a production process rather than being absent.
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
     # Find system libraries
     find_package(PkgConfig REQUIRED)
