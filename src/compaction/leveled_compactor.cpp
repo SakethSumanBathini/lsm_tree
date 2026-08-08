@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <algorithm>
 
+#include <queue>
+
 namespace {
 
 // Flushes a file's contents to stable storage.
@@ -25,6 +27,18 @@ void fsyncDir(const std::string& dir) {
     ::fsync(fd);
     ::close(fd);
 }
+
+struct HeapNode {
+    SSTable::Entry entry;
+    size_t sst_index; // Index in sstables vector (higher = newer table)
+
+    bool operator>(const HeapNode& other) const {
+        if (entry.key != other.entry.key) {
+            return entry.key > other.entry.key;
+        }
+        return sst_index < other.sst_index; // Higher sst_index wins
+    }
+};
 
 } // namespace
 
@@ -55,9 +69,7 @@ void LeveledCompactor::run(std::vector<std::unique_ptr<SSTable>>& sstables, int&
     std::cout << "[Compaction] Merging " << l0_paths.size() << " L0 tables with "
               << l1_paths.size() << " L1 tables...\n";
 
-    // Sweep temporaries abandoned by an earlier interrupted compaction. They
-    // are never loaded — the engine only picks up files matching sst-N-*.sst —
-    // but without this they accumulate one per interrupted run.
+    // Sweep temporaries abandoned by an earlier interrupted compaction.
     {
         std::error_code ec;
         for (const auto& entry : std::filesystem::directory_iterator(data_dir_, ec)) {
@@ -71,37 +83,6 @@ void LeveledCompactor::run(std::vector<std::unique_ptr<SSTable>>& sstables, int&
         }
     }
 
-    // Merge all active SSTable entries
-    // Since sstables are stored in oldest-to-newest order, iterating through them
-    // and overwriting keys guarantees that newer updates shadow older ones.
-    std::map<std::string, std::optional<std::string>> merged;
-    for (const auto& sst : sstables) {
-        for (const auto& e : sst->readAll()) {
-            merged[e.key] = e.value;
-        }
-    }
-
-    // Filter out tombstones
-    std::vector<SSTable::Entry> entries;
-    for (const auto& [k, v] : merged) {
-        if (v.has_value()) {
-            entries.push_back({k, v});
-        }
-    }
-
-    // The replacement tables are written and made durable before anything is
-    // deleted.
-    //
-    // Previously the old tables were removed first and the merged result lived
-    // only in the `merged`/`entries` vectors above — in memory. Anything that
-    // stopped execution in the window between the removals and the last
-    // SSTable::write took every table with it, and there is no fallback:
-    // flushMemtable() calls wal_.clear() before invoking compaction, so the log
-    // has already been truncated by the time this runs.
-    //
-    // New tables are numbered past the highest existing L1 file so their final
-    // names cannot collide with the ones still on disk. That is what lets the
-    // renames happen while the old files are still live.
     int l1_start = 0;
     for (const auto& p : l1_paths) {
         const std::string stem = std::filesystem::path(p).stem().string(); // sst-1-000007
@@ -110,32 +91,69 @@ void LeveledCompactor::run(std::vector<std::unique_ptr<SSTable>>& sstables, int&
             try {
                 l1_start = std::max(l1_start, std::stoi(stem.substr(dash + 1)) + 1);
             } catch (const std::exception&) {
-                // Unparseable name: ignore it rather than risk reusing an index.
+                // Unparseable name: ignore it
             }
         }
     }
 
-    // Phase 1 - write every replacement to a temporary name and fsync it.
+    // Phase 1 - Streaming K-Way merge using Min-Heap
     std::vector<std::pair<std::string, std::string>> staged; // temporary -> final
     int l1_counter = l1_start;
+
     try {
-        if (!entries.empty()) {
-            for (size_t i = 0; i < entries.size(); i += L1_MAX_FILE_ENTRIES) {
-                size_t end_idx = std::min(i + L1_MAX_FILE_ENTRIES, entries.size());
-                std::vector<SSTable::Entry> sub_entries(entries.begin() + i, entries.begin() + end_idx);
+        std::priority_queue<HeapNode, std::vector<HeapNode>, std::greater<HeapNode>> min_heap;
+        std::vector<std::unique_ptr<SSTableIterator>> iterators;
+        iterators.reserve(sstables.size());
 
-                std::string final_path = makeSSTPath(1, l1_counter++);
-                std::string tmp_path = final_path + ".tmp";
-
-                SSTable::write(tmp_path, sub_entries);
-                fsyncFile(tmp_path);
-                staged.emplace_back(tmp_path, final_path);
+        for (size_t i = 0; i < sstables.size(); ++i) {
+            iterators.push_back(sstables[i]->createIterator());
+            if (iterators[i]->hasNext()) {
+                min_heap.push(HeapNode{iterators[i]->next(), i});
             }
         }
+
+        std::vector<SSTable::Entry> current_l1_buffer;
+        current_l1_buffer.reserve(L1_MAX_FILE_ENTRIES);
+
+        auto flushBuffer = [&]() {
+            if (current_l1_buffer.empty()) return;
+            std::string final_path = makeSSTPath(1, l1_counter++);
+            std::string tmp_path = final_path + ".tmp";
+            SSTable::write(tmp_path, current_l1_buffer);
+            fsyncFile(tmp_path);
+            staged.emplace_back(tmp_path, final_path);
+            current_l1_buffer.clear();
+        };
+
+        while (!min_heap.empty()) {
+            std::string current_key = min_heap.top().entry.key;
+            HeapNode winner = min_heap.top();
+            min_heap.pop();
+
+            if (iterators[winner.sst_index]->hasNext()) {
+                min_heap.push(HeapNode{iterators[winner.sst_index]->next(), winner.sst_index});
+            }
+
+            // Consume older duplicates of current_key
+            while (!min_heap.empty() && min_heap.top().entry.key == current_key) {
+                size_t duplicate_idx = min_heap.top().sst_index;
+                min_heap.pop();
+                if (iterators[duplicate_idx]->hasNext()) {
+                    min_heap.push(HeapNode{iterators[duplicate_idx]->next(), duplicate_idx});
+                }
+            }
+
+            // Stream non-tombstone entry to L1 buffer
+            if (winner.entry.value.has_value()) {
+                current_l1_buffer.push_back(winner.entry);
+                if (current_l1_buffer.size() >= L1_MAX_FILE_ENTRIES) {
+                    flushBuffer();
+                }
+            }
+        }
+
+        flushBuffer();
     } catch (...) {
-        // Nothing has been renamed or deleted yet, so the tables on disk are
-        // still the complete set. Discard the partial work and leave the
-        // database exactly as it was.
         for (const auto& [tmp, fin] : staged) {
             // Also best effort, and deliberately silent: this runs during
             // unwinding, and a cleanup failure must not displace the exception

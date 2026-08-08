@@ -17,9 +17,12 @@ echo "  LSM-Tree Key-Value Store — Test Runner  "
 echo "==========================================="
 
 echo "Running Unit Tests..."
-"$BUILD_DIR/test_skip_list"
-"$BUILD_DIR/test_bloom_filter"
-"$BUILD_DIR/test_wal_recovery"
+./build/test_skip_list
+./build/test_bloom_filter
+./build/test_wal_recovery
+./build/test_sstable
+./build/test_compaction_streaming
+./build/test_block_cache
 
 echo "Running Benchmarks..."
 "$BUILD_DIR/bench_write"
