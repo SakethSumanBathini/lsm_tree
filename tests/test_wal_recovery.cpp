@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <unistd.h>
+#include <cerrno>
+#include <cstring>
 
 void pass(const std::string& test) {
     std::cout << "  \033[32m✓\033[0m " << test << "\n";
@@ -53,18 +55,48 @@ int main() {
         wal.logPut("corrupt_key", "corrupt_data");
     }
 
-    // Corrupt a byte in the second entry of the WAL file
+    // Corrupt a byte in the second entry of the WAL file.
+    //
+    // Every step here is checked. Previously open(), lseek() and write() all
+    // discarded their results and the whole block was wrapped in `if (fd >= 0)`,
+    // so any failure meant the file was silently left intact — and the
+    // assertions below would then pass against an uncorrupted log, reporting
+    // success for a check that never ran. A test that cannot fail is worse than
+    // no test, because it is counted as coverage.
     std::string wal_path = "/tmp/lsm_test_wal_corrupt/wal.log";
     int fd = open(wal_path.c_str(), O_RDWR);
-    if (fd >= 0) {
-        off_t size = lseek(fd, 0, SEEK_END);
-        if (size >= 512) {
-            // Write a corrupt type byte at the start of the second block (offset 512)
-            lseek(fd, 512, SEEK_SET);
-            char corrupt_byte = 0x03; // Invalid type to cause CRC mismatch
-            [[maybe_unused]] ssize_t w = write(fd, &corrupt_byte, 1);
-        }
+    if (fd < 0) {
+        fail("CRC Corruption", std::string("cannot open WAL to corrupt it: ") + std::strerror(errno));
+    }
+
+    off_t size = lseek(fd, 0, SEEK_END);
+    if (size < 0) {
         close(fd);
+        fail("CRC Corruption", std::string("lseek to end failed: ") + std::strerror(errno));
+    }
+    if (size < 1024) {
+        close(fd);
+        fail("CRC Corruption",
+             "WAL is " + std::to_string(size) + " bytes; expected at least two 512-byte blocks, "
+             "so there is no second entry to corrupt");
+    }
+
+    if (lseek(fd, 512, SEEK_SET) != 512) {
+        close(fd);
+        fail("CRC Corruption", std::string("lseek to offset 512 failed: ") + std::strerror(errno));
+    }
+
+    char corrupt_byte = 0x03; // Invalid type to cause CRC mismatch
+    const ssize_t written = write(fd, &corrupt_byte, 1);
+    if (written != 1) {
+        close(fd);
+        fail("CRC Corruption",
+             "write of corruption byte returned " + std::to_string(written) + ": " +
+             std::strerror(errno));
+    }
+
+    if (close(fd) != 0) {
+        fail("CRC Corruption", std::string("close after corrupting failed: ") + std::strerror(errno));
     }
 
     // Reopen. The engine should skip the corrupt second entry but keep the safe one
